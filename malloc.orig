@@ -1,0 +1,227 @@
+#include <stdio.h>
+#include <stdlib.h>
+#pragma GCC diagnostic ignored "-Wsign-compare"
+
+//小内存分配管理程序
+//需要将原桶描述符分割为桶描述符和内存描述符
+struct page_desc;
+struct mem_desc {	// 动态按页分配，当所在页内存引用为0时，可释放所在页, 本身不直接释放
+	void				*addr;	//添加保留malloc 的地址, free 会用到
+	struct mem_desc 	*next;		// 下连分配的块（malloc), 或free的块
+	struct page_desc	*p_desc;	//获取page 以修改其refcnt,当为malloc 时
+};
+
+struct page_desc {		// 动态分配, 一经分配，不再释放，refcnt为0，进入free_page_desc 链表
+	void				*page;
+	unsigned short		refcnt;
+};
+struct bucket_desc {			// 只有10个,不用动态分配内存
+	struct mem_desc		*freeptr;	//contains a linked list of free mem descriptor blocks
+	struct mem_desc		*chain;		//contains a linked list of used mem descriptor blocks
+};
+
+struct _bucket_dir {	/* 8 bytes */
+	int			size;
+	struct bucket_desc	b_desc;		//contain bucket_desc?
+};
+
+/*
+ * Note that this list *must* be kept in order.
+ */
+struct _bucket_dir bucket_dir[] = {
+	{ 16,		{0,		0}},
+	{ 32,		{0,		0}},
+	{ 64,		{0,		0}},
+	{ 128,		{0,		0}},
+	{ 256,		{0,		0}},
+	{ 512,		{0,		0}},
+	{ 1024,		{0,		0}},
+	{ 2048,		{0,		0}},
+	{ 4096,		{0,		0}},
+	{ 0,		{0,		0}}
+};   /* End of list marker */
+
+/*
+ * This contains a linked list of free bucket descriptor blocks
+ */
+//struct mem_desc *free_mem_desc = (struct mem_desc *) 0;
+struct page_desc *free_page_desc = (struct page_desc *) 0;
+
+#define PAGE_SIZE 4096
+void *get_free_page()
+{
+	return calloc(1,PAGE_SIZE);
+}
+
+void free_page(void *p)
+{
+	free(p);
+}
+void panic(char *msg)
+{
+	printf("%s\n",msg);
+	exit(1);
+}
+
+//分配一页内存，分割为内存描述符并构成链表
+static inline void init_mem_desc(struct mem_desc **desc)
+{
+	struct mem_desc *mdesc, *first;
+	int	i;
+	
+	first = mdesc = (struct mem_desc *) get_free_page();
+	if (!mdesc)
+		panic("Out of memory in init_mem_desc()");
+	for (i = PAGE_SIZE/sizeof(struct mem_desc); i > 1; i--) {
+		mdesc->next = mdesc+1;
+		mdesc++;		//建立mdesc 链表
+	}
+	/*
+	 * This is done last, to avoid race conditions in case 
+	 * get_free_page() sleeps and this routine gets called again....
+	 */
+	mdesc->next = 0;
+	*desc = first;		//返回头指针
+}
+
+//分配一页内存，分割为页面描述符并构成链表
+static inline void init_page_desc(struct page_desc **desc)
+{
+	struct page_desc *pg_desc, *first;
+	int	i;
+	
+	first = pg_desc = (struct page_desc *) get_free_page();
+	if (!mdesc)
+		panic("Out of memory in init_page_desc()");
+	for (i = PAGE_SIZE/sizeof(struct page_desc); i > 1; i--) {
+		pg_desc->next = pg_desc+1;
+		pg_desc++;		//建立page_desc 链表
+	}
+	/*
+	 * This is done last, to avoid race conditions in case 
+	 * get_free_page() sleeps and this routine gets called again....
+	 */
+	pg_desc->next = 0;
+	*desc = first;		//返回头指针
+}
+/*
+ * This routine initializes a bucket description page.
+ */
+static int dir_hasInit = 0;
+static inline void init_bucket_desc()
+{
+	if(dir_hasInit) return;
+	dir_hasInit = 1;
+}
+// 这个函数根本就没有人调用,改了名也没关系.
+void *my_malloc(unsigned int len)
+{
+	struct _bucket_dir	*bdir;
+	init_bucket_desc();
+	/*
+	 * First we search the bucket_dir to find the right bucket
+	 * for this request.
+	 */
+	for (bdir = bucket_dir; bdir->size; bdir++)
+		if (bdir->size >= len)
+			break;
+	if (!bdir->size) {
+		printf("malloc called with impossibly large argument (%d)\n", len);
+		panic("malloc: bad arg");
+	}
+	/*
+	 * Now we search for a bucket descriptor which has free space
+	 */
+//	cli();	/* Avoid race conditions */
+	/*
+	 * If we didn't find a bucket with free space, then we'll 
+	 * allocate a new one.
+	 */
+	 {
+		char		*cp;
+		int		i;
+
+		if (!bdir->b_desc.freeptr)	
+			init_mem_desc(&bdir->b_desc.freeptr);	// 先分配一页内存描述符
+	   //再申请一页页面描述符
+	   	if (!free_page_desc)
+			init_page_desc(&free_page_desc);
+		//再申请一页内存，按大小分割并构成链表
+		if()
+		bdesc->page = bdesc->freeptr = (void *) (cp = (char *) get_free_page());
+		if (!cp)
+			panic("Out of memory in kernel malloc()");
+		/* Set up the chain of free objects */
+		for (i=PAGE_SIZE/bdir->size; i > 1; i--) { //建立空闲内存链表
+			*((char **) cp) = cp + bdir->size;
+			cp += bdir->size;
+		}
+		*((char **) cp) = 0;
+	}
+	bdesc->next = bdir->chain; /* OK, link it in! */
+	bdir->chain = bdesc;		//把描述符付给已分配桶链,把原桶链链到下一个
+	retval = (void *) bdesc->freeptr; //调整该桶的空闲指针
+	bdesc->freeptr = *((void **) retval); 
+	bdesc->refcnt++;				//该桶描述符refcnt 加1 ？ 需要修改
+	bdesc->addr = retval;
+//	sti();	/* OK, we're safe again */
+	return(retval);
+}
+
+/*
+ * Here is the free routine.  If you know the size of the object that you
+ * are freeing, then free_s() will use that information to speed up the
+ * search for the bucket descriptor.
+ * 
+ * We will #define a macro so that "free(x)" is becomes "free_s(x, 0)"
+ */
+void free_s(void *obj, int size)
+{
+//	void		*page;
+	struct _bucket_dir	*bdir;
+	struct bucket_desc	*bdesc, *prev;
+	bdesc = prev = 0;
+	/* Calculate what page this object lives in */
+//	page = (void *)  ((unsigned long) obj & 0xfffff000);
+	/* Now search the buckets looking for that page */
+	for (bdir = bucket_dir; bdir->size; bdir++) {
+		prev = 0;
+		/* If size is zero then this conditional is always false */
+		if (bdir->size < size)
+			continue;
+		for (bdesc = bdir->chain; bdesc; bdesc = bdesc->next) {
+			if (bdesc->addr == obj) 
+				goto found;
+			prev = bdesc;
+		}
+	}
+	panic("Bad address passed to kernel free_s()");
+found:
+//	cli(); /* To avoid race conditions */
+	*((void **)obj) = bdesc->freeptr;	//构成空闲链
+	bdesc->freeptr = obj;
+	bdesc->refcnt--;
+	if (bdesc->refcnt == 0) {  // pay attention!!
+		/*
+		 * We need to make sure that prev is still accurate.  It
+		 * may not be, if someone rudely interrupted us....
+		 */
+		if ((prev && (prev->next != bdesc)) || (!prev && (bdir->chain != bdesc)))
+			for (prev = bdir->chain; prev; prev = prev->next)
+				if (prev->next == bdesc)
+					break;
+		if (prev)
+			prev->next = bdesc->next;
+		else {
+			if (bdir->chain != bdesc)
+				panic("malloc bucket chains corrupted");
+			bdir->chain = bdesc->next;
+		}
+		free_page(bdesc->page);
+		bdesc->next = free_bucket_desc;
+		free_bucket_desc = bdesc;
+	}
+//	sti();
+	return;
+}
+

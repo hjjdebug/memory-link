@@ -1,0 +1,4 @@
+src=$PWD CD=. filter="*.h *.c" {
+ main.c
+ malloc.c
+}
